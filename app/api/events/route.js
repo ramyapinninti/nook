@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 
 const clampQuietScore = (score) => Math.max(0, Math.min(100, Math.round(score)));
-const LOUD_EVENT_CATEGORIES = ["Rock", "Metal", "Stadium"];
+const LOUD_EVENT_CATEGORIES = ["Rock", "Metal", "Concert", "Stadium", "Arena"];
 const PREMIUM_QUIET_CATEGORIES = ["Library", "Museum", "Botanical", "Acoustic"];
+const SANCTUARY_VENUES = ["Library", "Museum", "Botanical Garden"];
 
 const includesCategory = (values, categories) => {
   const normalizedValues = values
@@ -16,7 +17,15 @@ const includesCategory = (values, categories) => {
 
 const capLoudEventQuietScore = (score, values) => {
   if (includesCategory(values, LOUD_EVENT_CATEGORIES)) {
-    return Math.min(score, 20);
+    return Math.min(score, 29);
+  }
+
+  return score;
+};
+
+const applySanctuaryVenueFloor = (score, values) => {
+  if (includesCategory(values, SANCTUARY_VENUES)) {
+    return Math.max(score, 91);
   }
 
   return score;
@@ -42,7 +51,10 @@ function calculateGoogleQuietScore(place, displayCategory) {
   if (types.includes("restaurant")) score -= 6;
   if (typeof place.rating === "number") score += (place.rating - 4) * 5;
 
-  return clampQuietScore(score);
+  return applySanctuaryVenueFloor(clampQuietScore(score), [
+    displayCategory,
+    place.name,
+  ]);
 }
 
 function calculateTicketmasterQuietScore(event, segment, genre) {
@@ -50,6 +62,7 @@ function calculateTicketmasterQuietScore(event, segment, genre) {
   const subGenre = event.classifications?.[0]?.subGenre?.name || "";
   const type = event.classifications?.[0]?.type?.name || "";
   const venueName = event._embedded?.venues?.[0]?.name || "";
+  const isUncertainEvent = !segment || segment === "Event" || !genre || genre === "Undefined";
   let score = 45;
 
   if (segment === "Arts & Theatre") score += 24;
@@ -63,13 +76,16 @@ function calculateTicketmasterQuietScore(event, segment, genre) {
   if (eventName.includes("rock") || eventName.includes("metal")) score -= 38;
   if (eventName.includes("festival") || eventName.includes("party")) score -= 24;
   if (includesCategory([genre, subGenre, event.name], ["Acoustic"])) score = Math.max(score, 86);
+  if (isUncertainEvent) score -= 22;
 
-  return capLoudEventQuietScore(clampQuietScore(score), [
+  const scored = applySanctuaryVenueFloor(clampQuietScore(score), [venueName]);
+  if (isUncertainEvent) return Math.min(scored, 29);
+
+  return capLoudEventQuietScore(scored, [
     segment,
     genre,
     subGenre,
     type,
-    venueName,
     event.name,
   ]);
 }
@@ -146,13 +162,14 @@ export async function GET(request) {
       const quietScore = calculateTicketmasterQuietScore(event, segment, genre);
       const displayCategory = genre && genre !== "Undefined" ? genre : segment;
       const isPremiumQuiet = includesCategory([displayCategory, subGenre, event.name], PREMIUM_QUIET_CATEGORIES);
-      const isLoudEvent = includesCategory([segment, genre, subGenre, type, venueName, event.name], LOUD_EVENT_CATEGORIES);
+      const isLoudEvent = includesCategory([segment, genre, subGenre, type, event.name], LOUD_EVENT_CATEGORIES);
+      const isUncertainEvent = !segment || segment === "Event" || !genre || genre === "Undefined";
       
       let score = 20;
       if (cozy) {
         if (segment === "Arts & Theatre" || genre === "Classical") score += 40;
         if (segment === "Sports" || segment === "Music") score -= 80;
-        if (isLoudEvent) score -= 100;
+        if (isLoudEvent || isUncertainEvent) score -= 100;
       }
       if (isPremiumQuiet && quietScore > 80) score += 60;
 
@@ -181,4 +198,3 @@ export async function GET(request) {
     return NextResponse.json({ error: "Fetch failed" }, { status: 500 });
   }
 }
-
