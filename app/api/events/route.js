@@ -17,7 +17,7 @@ const includesCategory = (values, categories) => {
 
 const capLoudEventQuietScore = (score, values) => {
   if (includesCategory(values, LOUD_EVENT_CATEGORIES)) {
-    return Math.min(score, 15); // Dropped from 29 to 15 for extra safety
+    return Math.min(score, 15); 
   }
   return score;
 };
@@ -32,7 +32,7 @@ const applySanctuaryVenueFloor = (score, values) => {
 function calculateGoogleQuietScore(place, displayCategory) {
   const types = place.types || [];
   const typeScores = {
-    Library: 98, // Increased
+    Library: 98,
     Bookstore: 92,
     "Museum/Gallery": 88,
     Botanical: 94,
@@ -61,7 +61,6 @@ function calculateTicketmasterQuietScore(event, segment, genre) {
   if (genre === "Classical") score += 35;
   if (genre === "Fine Art" || genre === "Theatre") score += 20;
   if (segment === "Sports" || segment === "Music") score -= 40;
-  if (eventName.includes("rock") || eventName.includes("metal")) score -= 50;
   
   const scored = applySanctuaryVenueFloor(clampQuietScore(score), [venueName]);
   if (isUncertainEvent) return Math.min(scored, 20);
@@ -83,7 +82,6 @@ export async function GET(request) {
     let ticketmasterResults = [];
 
     // --- 1. GOOGLE PLACES ---
-    // Change: Refined search logic to focus on the specific query
     const googleSearchQuery = query 
       ? `${query} in ${location}` 
       : `quiet study spots libraries cafes in ${location}`;
@@ -93,7 +91,6 @@ export async function GET(request) {
     const gData = await gRes.json();
 
     if (gData.results) {
-      // Increased slice to 20 to find more libraries when requested
       googleResults = gData.results.slice(0, 20).map(place => {
         const types = place.types || [];
         const name = place.name.toLowerCase();
@@ -103,11 +100,25 @@ export async function GET(request) {
         else if (types.includes("cafe") || types.includes("coffee_shop")) displayCategory = "Cafe";
         else if (types.includes("book_store")) displayCategory = "Bookstore";
         else if (types.includes("museum") || types.includes("art_gallery")) displayCategory = "Museum/Gallery";
+        else if (types.includes("university")) displayCategory = "Campus Spot";
 
         const quietScore = calculateGoogleQuietScore(place, displayCategory);
         
-        // Boost points if it matches the user's specific query
+        // --- MOOD WEIGHTING LOGIC ---
         let relevanceScore = quietScore;
+
+        if (mood === "cozy") {
+          if (quietScore > 85) relevanceScore += 40;
+          if (PREMIUM_QUIET_CATEGORIES.includes(displayCategory)) relevanceScore += 25;
+        } else if (mood === "energetic") {
+          // Reward lively cafes/campus spots (50-75% quiet)
+          if (quietScore > 50 && quietScore < 76) relevanceScore += 40;
+          if (["Cafe", "Campus Spot", "Museum/Gallery"].includes(displayCategory)) relevanceScore += 20;
+          // De-prioritize extreme silence for energetic mode
+          if (quietScore > 92) relevanceScore -= 15;
+        }
+
+        // Boost for specific user query matches
         if (query && (name.includes(query.toLowerCase()) || displayCategory.toLowerCase().includes(query.toLowerCase()))) {
           relevanceScore += 50; 
         }
@@ -117,9 +128,9 @@ export async function GET(request) {
           name: place.name,
           category: displayCategory,
           rating: place.rating,
-          reason: `Rated ${place.rating} stars. Perfect for a ${mood} atmosphere.`,
+          reason: `Perfect for a ${mood} atmosphere.`,
           quietScore,
-          score: relevanceScore, // Use boosted score for sorting
+          score: relevanceScore, 
           url: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place.name + " " + location)}`
         };
       });
@@ -136,11 +147,16 @@ export async function GET(request) {
       const genre = event.classifications?.[0]?.genre?.name || "";
       const quietScore = calculateTicketmasterQuietScore(event, segment, genre);
       
-      let score = quietScore;
-      // Penalty: If user searched for a specific place type (like 'library'), 
-      // deprioritize events that aren't related.
+      let relevanceScore = quietScore;
+
+      if (mood === "cozy") {
+        if (quietScore < 60) relevanceScore -= 50;
+      } else if (mood === "energetic") {
+        if (quietScore > 40 && quietScore < 70) relevanceScore += 20;
+      }
+
       if (query && !event.name.toLowerCase().includes(query.toLowerCase())) {
-        score -= 60;
+        relevanceScore -= 60;
       }
 
       return {
@@ -148,14 +164,13 @@ export async function GET(request) {
         name: event.name,
         category: genre !== "Undefined" ? genre : segment,
         quietScore,
-        score,
+        score: relevanceScore,
         url: event.url
       };
     });
 
-    // --- 3. MERGE & FILTER ---
     const finalResults = [...googleResults, ...ticketmasterResults]
-      .filter(item => item.quietScore > 20) // Filter out clearly loud stuff
+      .filter(item => item.quietScore > 15)
       .sort((a, b) => b.score - a.score);
 
     return NextResponse.json(finalResults.slice(0, 15));
