@@ -1,13 +1,34 @@
 import { NextResponse } from "next/server";
 
 const clampQuietScore = (score) => Math.max(0, Math.min(100, Math.round(score)));
+const LOUD_EVENT_CATEGORIES = ["Rock", "Metal", "Stadium"];
+const PREMIUM_QUIET_CATEGORIES = ["Library", "Museum", "Botanical", "Acoustic"];
+
+const includesCategory = (values, categories) => {
+  const normalizedValues = values
+    .filter(Boolean)
+    .map((value) => value.toLowerCase());
+
+  return categories.some((category) =>
+    normalizedValues.some((value) => value.includes(category.toLowerCase()))
+  );
+};
+
+const capLoudEventQuietScore = (score, values) => {
+  if (includesCategory(values, LOUD_EVENT_CATEGORIES)) {
+    return Math.min(score, 20);
+  }
+
+  return score;
+};
 
 function calculateGoogleQuietScore(place, displayCategory) {
   const types = place.types || [];
   const typeScores = {
     Library: 96,
     Bookstore: 90,
-    "Museum/Gallery": 84,
+    "Museum/Gallery": 88,
+    Botanical: 92,
     "Quiet Park": 82,
     "Campus Spot": 76,
     Cafe: 70,
@@ -26,6 +47,9 @@ function calculateGoogleQuietScore(place, displayCategory) {
 
 function calculateTicketmasterQuietScore(event, segment, genre) {
   const eventName = event.name.toLowerCase();
+  const subGenre = event.classifications?.[0]?.subGenre?.name || "";
+  const type = event.classifications?.[0]?.type?.name || "";
+  const venueName = event._embedded?.venues?.[0]?.name || "";
   let score = 45;
 
   if (segment === "Arts & Theatre") score += 24;
@@ -38,8 +62,16 @@ function calculateTicketmasterQuietScore(event, segment, genre) {
   if (eventName.includes("acoustic") || eventName.includes("lecture")) score += 12;
   if (eventName.includes("rock") || eventName.includes("metal")) score -= 38;
   if (eventName.includes("festival") || eventName.includes("party")) score -= 24;
+  if (includesCategory([genre, subGenre, event.name], ["Acoustic"])) score = Math.max(score, 86);
 
-  return clampQuietScore(score);
+  return capLoudEventQuietScore(clampQuietScore(score), [
+    segment,
+    genre,
+    subGenre,
+    type,
+    venueName,
+    event.name,
+  ]);
 }
 
 export async function GET(request) {
@@ -76,11 +108,13 @@ export async function GET(request) {
           if (types.includes("library")) displayCategory = "Library";
           else if (types.includes("cafe") || types.includes("coffee_shop")) displayCategory = "Cafe";
           else if (types.includes("book_store")) displayCategory = "Bookstore";
+          else if (types.includes("botanical_garden") || place.name.toLowerCase().includes("botanical")) displayCategory = "Botanical";
           else if (types.includes("park")) displayCategory = "Quiet Park";
           else if (types.includes("museum") || types.includes("art_gallery")) displayCategory = "Museum/Gallery";
           else if (types.includes("university")) displayCategory = "Campus Spot";
 
           const quietScore = calculateGoogleQuietScore(place, displayCategory);
+          const isPremiumQuiet = includesCategory([displayCategory, place.name], PREMIUM_QUIET_CATEGORIES);
 
           return {
             id: place.place_id,
@@ -90,7 +124,7 @@ export async function GET(request) {
             rating: place.rating,
             reason: `Rated ${place.rating} stars. Perfect for a ${mood} atmosphere.`,
             quietScore,
-            score: quietScore + 15, // Higher priority for physical spots in study mode
+            score: quietScore + (isPremiumQuiet && quietScore > 80 ? 35 : 15),
             url: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(place.name)}&query_place_id=${place.place_id}`
           };
         });
@@ -106,20 +140,26 @@ export async function GET(request) {
     ticketmasterResults = events.map(event => {
       const segment = event.classifications?.[0]?.segment?.name || "Event";
       const genre = event.classifications?.[0]?.genre?.name || "";
-      const eventName = event.name.toLowerCase();
+      const subGenre = event.classifications?.[0]?.subGenre?.name || "";
+      const type = event.classifications?.[0]?.type?.name || "";
+      const venueName = event._embedded?.venues?.[0]?.name || "";
       const quietScore = calculateTicketmasterQuietScore(event, segment, genre);
+      const displayCategory = genre && genre !== "Undefined" ? genre : segment;
+      const isPremiumQuiet = includesCategory([displayCategory, subGenre, event.name], PREMIUM_QUIET_CATEGORIES);
+      const isLoudEvent = includesCategory([segment, genre, subGenre, type, venueName, event.name], LOUD_EVENT_CATEGORIES);
       
       let score = 20;
       if (cozy) {
         if (segment === "Arts & Theatre" || genre === "Classical") score += 40;
         if (segment === "Sports" || segment === "Music") score -= 80;
-        if (eventName.includes("rock") || eventName.includes("metal")) score -= 100;
+        if (isLoudEvent) score -= 100;
       }
+      if (isPremiumQuiet && quietScore > 80) score += 60;
 
       return {
         id: event.id,
         name: event.name,
-        category: genre && genre !== "Undefined" ? genre : segment,
+        category: displayCategory,
         date: event.dates?.start?.localDate,
         rating: null,
         reason: "A scheduled event that fits your energy profile.",
@@ -141,3 +181,4 @@ export async function GET(request) {
     return NextResponse.json({ error: "Fetch failed" }, { status: 500 });
   }
 }
+
